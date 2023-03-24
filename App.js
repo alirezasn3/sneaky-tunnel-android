@@ -51,10 +51,7 @@ export default function App() {
   async function startTunnel() {
     try {
       // declare global vars
-      const connectionToService = dgram.createSocket({
-        type: 'udp4',
-        debug: true
-      })
+      const connectionToService = dgram.createSocket({ type: 'udp4', debug: true })
       let userIP = null
       let userPort = null
       let clientPort = null
@@ -125,10 +122,8 @@ export default function App() {
               remoteInfo.port,
               remoteInfo.address,
               err => {
-                if (err) {
-                  log('error sending announcement packet: ' + err.message)
-                  throw err
-                } else {
+                if (err) log('error sending announcement packet: ' + err.message)
+                else {
                   log('sent announcement packet to server')
                   setStatus('connected')
                 }
@@ -141,10 +136,7 @@ export default function App() {
           }
         }
         connectionToService.send(data.slice(2), undefined, undefined, userPort, userIP, err => {
-          if (err) {
-            log('error sending data packet to service' + err.message)
-            throw err
-          }
+          if (err) log('error sending data packet to service' + err.message)
         })
       })
 
@@ -157,21 +149,18 @@ export default function App() {
       }
 
       // listen for packets from service
-      connectionToService.bind(1194)
+      connectionToService.bind(Number(servicePort))
+      const port = Number(serverPort) // to avoid reading config
+      const ip = config.serverIP // to avoid reading config
       connectionToService.on('message', (data, remoteInfo) => {
         userIP = remoteInfo.address
         userPort = remoteInfo.port
-        connectionToServer.send([0, 0, ...data], undefined, undefined, Number(serverPort), config.serverIP, err => {
-          if (err) {
-            log('error sending data packet to server' + err.message)
-            console.log(err)
-          }
+        connectionToServer.send([0, 0, ...data], undefined, undefined, port, ip, err => {
+          if (err) log('error sending data packet to server' + err.message)
         })
       })
 
-      while (true) {
-        await sleep(5000)
-      }
+      while (true) await sleep(10000)
     } catch (error) {
       log(error.message)
     } finally {
