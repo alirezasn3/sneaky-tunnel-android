@@ -31,26 +31,9 @@ export default function App() {
       const enabled = await Battery.isBatteryOptimizationEnabledAsync()
       if (enabled) log('Please disable battery optimization')
       else log('Battery optimization disabled')
-      await requestNotificationPermission()
       await loadConfig()
     })()
   }, [])
-
-  const requestNotificationPermission = async () => {
-    try {
-      let granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS, {
-        title: 'Sneaky Tunnel Notification Access',
-        message: 'Sneaky Tunnel needs access to post notifications.',
-        buttonNeutral: 'Ask Me Later',
-        buttonNegative: 'Cancel',
-        buttonPositive: 'Allow'
-      })
-      if (granted === PermissionsAndroid.RESULTS.GRANTED) log('Notification permission granted')
-      else log('Notification permission denied')
-    } catch (err) {
-      console.warn(err)
-    }
-  }
 
   async function loadConfig() {
     try {
@@ -129,9 +112,12 @@ export default function App() {
         if (remoteInfo.address !== config.serverIP) return
         if (data[0] > 0) {
           if (data[0] === 1) {
-            const announcementPacket = new Uint8Array(2)
+            const portBytes = stringToUint8Array(config.servicePort)
+            const announcementPacket = new Uint8Array(4)
             announcementPacket[0] = 4
             announcementPacket[1] = 0
+            announcementPacket[2] = portBytes[0]
+            announcementPacket[3] = portBytes[1]
             connectionToServer.send(
               announcementPacket,
               undefined,
@@ -204,27 +190,18 @@ export default function App() {
         setStatus('connecting')
         await AsyncStorage.setItem('@sneakytunnelstoragekey', JSON.stringify(config))
         log('Saved config')
-        await BackgroundService.start(
-          async taskDataArguments => {
-            try {
-              await startTunnel()
-            } catch (error) {
-              log(error.message)
-            }
+        await BackgroundService.start(startTunnel, {
+          taskName: 'Sneaky Tunnel',
+          taskTitle: 'Sneaky Tunnel',
+          taskDesc: 'Sneaky Tunnel Service Started',
+          taskIcon: {
+            name: 'ic_launcher',
+            type: 'mipmap'
           },
-          {
-            taskName: 'Sneaky Tunnel',
-            taskTitle: 'Connecting',
-            taskDesc: 'Connecting to remote server',
-            taskIcon: {
-              name: 'ic_launcher',
-              type: 'mipmap'
-            },
-            color: '#ff00ff',
-            linkingURI: 'yourSchemeHere://chat/jane', // See Deep Linking for more info
-            parameters: {}
-          }
-        )
+          color: '#ff00ff',
+          linkingURI: 'yourSchemeHere://chat/jane',
+          parameters: {}
+        })
       }
     } catch (error) {
       console.log(error)
@@ -243,12 +220,7 @@ export default function App() {
         })}] ${message}`
       }
     ])
-    logsRef.current?.scrollToEnd()
-    if (BackgroundService.isRunning()) {
-      await BackgroundService.updateNotification({
-        taskDesc: message
-      })
-    }
+    setTimeout(() => logsRef.current?.scrollToEnd(), 200)
   }
 
   function sleep(time) {
@@ -256,12 +228,26 @@ export default function App() {
   }
 
   function randomPort() {
-    return (Math.random() * 60536) | (0 + 5000) // 60536-65536
+    return (Math.random() * 60536) | (0 + 5000)
+  }
+
+  function stringToUint8Array(str) {
+    const number = Number(str)
+    let bits = number.toString(2)
+    const bitsArray = bits.split('')
+    while (bitsArray.length < 16) bitsArray.unshift('0')
+    bits = bitsArray.join('')
+    const firstByte = bits.slice(8)
+    const secondByte = bits.slice(0, 8)
+    const uint8Array = new Uint8Array(2)
+    uint8Array[0] = parseInt(firstByte, 2)
+    uint8Array[1] = parseInt(secondByte, 2)
+    return uint8Array
   }
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style="light" />
       <View style={styles.inputsContainer}>
         <View style={styles.innerInputsContainer}>
           <TextInput
@@ -284,14 +270,22 @@ export default function App() {
           onChangeText={t => setConfig(oldConfig => ({ ...oldConfig, negotiator: t }))}
         ></TextInput>
       </View>
-      <Text style={styles.statusText}>{status}</Text>
+      <Text
+        style={{
+          ...styles.statusText,
+          letterSpacing: 2,
+          color: status === 'connected' ? 'green' : 'disconnected' ? 'red' : 'orange'
+        }}
+      >
+        {status.toUpperCase()}
+      </Text>
       <FlatList
         scrollEnabled={false}
         ref={logsRef}
         data={logs}
-        renderItem={({ item }) => <Text>{item.title}</Text>}
+        renderItem={({ item }) => <Text style={{ color: 'white' }}>{item.title}</Text>}
         style={{
-          backgroundColor: '#eee',
+          backgroundColor: '#555',
           marginBottom: 16,
           borderRadius: 8,
           paddingHorizontal: 8,
@@ -314,7 +308,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     paddingVertical: 16,
-    paddingHorizontal: 8
+    paddingHorizontal: 8,
+    backgroundColor: '#222'
   },
   inputsContainer: {
     marginBottom: 16
@@ -325,10 +320,11 @@ const styles = StyleSheet.create({
     marginBottom: 16
   },
   input: {
-    backgroundColor: '#eee',
+    backgroundColor: '#555',
     paddingVertical: 8,
     paddingHorizontal: 16,
-    borderRadius: 8
+    borderRadius: 8,
+    color: 'white'
   },
   connectButtonContainer: {
     justifyContent: 'center',
