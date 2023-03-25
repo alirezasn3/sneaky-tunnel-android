@@ -1,20 +1,37 @@
 import { StatusBar } from 'expo-status-bar'
-import {
-  ActivityIndicator,
-  Button,
-  FlatList,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-  PermissionsAndroid
-} from 'react-native'
+import { ActivityIndicator, Button, FlatList, StyleSheet, Text, TextInput, View, ToastAndroid } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import * as Battery from 'expo-battery'
 import BackgroundService from 'react-native-background-actions'
 import { useEffect, useRef, useState } from 'react'
 import dgram from 'react-native-udp'
+
+function sleep(time) {
+  return new Promise(resolve => setTimeout(() => resolve(), time))
+}
+
+function randomPort() {
+  return (Math.random() * 60536) | (0 + 5000)
+}
+
+function stringToUint8Array(str) {
+  const number = Number(str)
+  let bits = number.toString(2)
+  const bitsArray = bits.split('')
+  while (bitsArray.length < 16) bitsArray.unshift('0')
+  bits = bitsArray.join('')
+  const firstByte = bits.slice(8)
+  const secondByte = bits.slice(0, 8)
+  const uint8Array = new Uint8Array(2)
+  uint8Array[0] = parseInt(firstByte, 2)
+  uint8Array[1] = parseInt(secondByte, 2)
+  return uint8Array
+}
+
+function showToast(message) {
+  ToastAndroid.show(message, ToastAndroid.LONG)
+}
 
 export default function App() {
   const [status, setStatus] = useState('disconnected')
@@ -51,18 +68,22 @@ export default function App() {
   async function startTunnel() {
     try {
       // declare global vars
-      const connectionToService = dgram.createSocket({ type: 'udp4', debug: true })
+      const connectionToService = dgram.createSocket({ type: 'udp4' })
+      const connectionToServer = dgram.createSocket({ type: 'udp4' })
       let userIP = null
       let userPort = null
       let clientPort = null
       let serverPort = null
+      let announced = false
+      const serverIP = config.serverIP
+      let lastReceivedPacket = Date.now()
+      let shouldClose = false
 
       // get public ip
       const publicIP = await (await fetch('https://api.ipify.org')).text()
       log(publicIP)
 
       // test negotiator
-      console.log(config.negotiator)
       let res = await fetch(config.negotiator, { method: 'HEAD' })
       if (res.status === 200) {
         log('negotiator ok')
@@ -72,10 +93,6 @@ export default function App() {
       }
 
       // open port and negotiate
-      const connectionToServer = dgram.createSocket({
-        type: 'udp4',
-        debug: true
-      })
       connectionToServer.bind(randomPort())
       connectionToServer.once('listening', () => {
         clientPort = connectionToServer.address().port
@@ -84,9 +101,10 @@ export default function App() {
       while (clientPort === null) {
         await sleep(50)
       }
-      res = await fetch(`${config.negotiator}/${config.serverIP}/${publicIP}:${clientPort}`)
+      res = await fetch(`${config.negotiator}/${serverIP}/${publicIP}:${clientPort}`)
       if (res.status === 200) {
         serverPort = await res.text()
+        serverPort = Number(serverPort)
         log('negotiated server port: ' + serverPort)
       } else {
         log('could not negotatie server port')
@@ -97,43 +115,25 @@ export default function App() {
       const dummyPacket = new Uint8Array(2)
       dummyPacket[0] = 1
       dummyPacket[1] = 0
-      connectionToServer.send(dummyPacket, undefined, undefined, Number(serverPort), config.serverIP, err => {
-        if (err) {
-          log('error sending dummy packet: ' + err.message)
-          throw err
-        }
+      connectionToServer.send(dummyPacket, undefined, undefined, Number(serverPort), serverIP, err => {
+        if (err) log('error sending dummy packet: ' + err.message)
+        else log('sent dummy packet to server')
       })
 
       // listen for packets from server
       connectionToServer.on('message', (data, remoteInfo) => {
-        if (remoteInfo.address !== config.serverIP) return
+        if (remoteInfo.address !== serverIP) return
         if (data[0] > 0) {
           if (data[0] === 1) {
-            const portBytes = stringToUint8Array(config.servicePort)
-            const announcementPacket = new Uint8Array(4)
-            announcementPacket[0] = 4
-            announcementPacket[1] = 0
-            announcementPacket[2] = portBytes[0]
-            announcementPacket[3] = portBytes[1]
-            connectionToServer.send(
-              announcementPacket,
-              undefined,
-              undefined,
-              remoteInfo.port,
-              remoteInfo.address,
-              err => {
-                if (err) log('error sending announcement packet: ' + err.message)
-                else {
-                  log('sent announcement packet to server')
-                  setStatus('connected')
-                }
-              }
-            )
-            return
+            log('received dummy packet from server')
+            setStatus('connected')
           } else if (data[0] === 2) {
-            // keep-alive packet
-            return
+            lastReceivedPacket = Date.now()
+            connectionToServer.send([5, 0], undefined, undefined, serverPort, serverIP, err => {
+              if (err) log('failed to send keep-alive response to server')
+            })
           }
+          return
         }
         connectionToService.send(data.slice(2), undefined, undefined, userPort, userIP, err => {
           if (err) log('error sending data packet to service' + err.message)
@@ -142,7 +142,7 @@ export default function App() {
 
       // ask for dummy packet
       await sleep(3000)
-      res = await fetch(`${config.negotiator}/${config.serverIP}/${publicIP}:${clientPort}`, { method: 'POST' })
+      res = await fetch(`${config.negotiator}/${serverIP}/${publicIP}:${clientPort}`, { method: 'POST' })
       if (res.status !== 200) {
         log('Failed to ask for dummy packet with status: ' + res.status)
         return
@@ -150,22 +150,51 @@ export default function App() {
 
       // listen for packets from service
       connectionToService.bind(Number(config.servicePort))
-      const port = Number(serverPort) // to avoid reading config
-      const ip = config.serverIP // to avoid reading config
       connectionToService.on('message', (data, remoteInfo) => {
-        userIP = remoteInfo.address
-        userPort = remoteInfo.port
-        connectionToServer.send([0, 0, ...data], undefined, undefined, port, ip, err => {
+        if (!announced) {
+          const portBytes = stringToUint8Array(config.servicePort)
+          const announcementPacket = new Uint8Array(4)
+          announcementPacket[0] = 4
+          announcementPacket[1] = 0
+          announcementPacket[2] = portBytes[0]
+          announcementPacket[3] = portBytes[1]
+          connectionToServer.send(
+            announcementPacket,
+            undefined,
+            undefined,
+            remoteInfo.port,
+            remoteInfo.address,
+            err => {
+              if (err) log('error sending announcement packet: ' + err.message)
+              else {
+                log('sent announcement packet to server')
+                setStatus('connected')
+              }
+            }
+          )
+          userIP = remoteInfo.address
+          userPort = remoteInfo.port
+        }
+        connectionToServer.send([0, 0, ...data], undefined, undefined, serverPort, serverIP, err => {
           if (err) log('error sending data packet to server' + err.message)
         })
       })
 
-      while (true) await sleep(10000)
+      while (!shouldClose) {
+        if (Date.now() - lastReceivedPacket > 15000) {
+          shouldClose = true
+          setStatus('disconnected')
+          showToast('Sneaky Tunnel Disconnected')
+          log('did not receive keep-alive packet in time')
+        }
+        await sleep(15000)
+      }
     } catch (error) {
       log(error.message)
     } finally {
-      log('Service finished')
       setStatus('disconnected')
+      showToast('Sneaky Tunnel Disconnected')
+      log('service exited')
     }
   }
 
@@ -209,29 +238,7 @@ export default function App() {
         })}] ${message}`
       }
     ])
-    setTimeout(() => logsRef.current?.scrollToEnd(), 200)
-  }
-
-  function sleep(time) {
-    return new Promise(resolve => setTimeout(() => resolve(), time))
-  }
-
-  function randomPort() {
-    return (Math.random() * 60536) | (0 + 5000)
-  }
-
-  function stringToUint8Array(str) {
-    const number = Number(str)
-    let bits = number.toString(2)
-    const bitsArray = bits.split('')
-    while (bitsArray.length < 16) bitsArray.unshift('0')
-    bits = bitsArray.join('')
-    const firstByte = bits.slice(8)
-    const secondByte = bits.slice(0, 8)
-    const uint8Array = new Uint8Array(2)
-    uint8Array[0] = parseInt(firstByte, 2)
-    uint8Array[1] = parseInt(secondByte, 2)
-    return uint8Array
+    setTimeout(() => logsRef.current?.scrollToEnd())
   }
 
   return (
@@ -272,13 +279,16 @@ export default function App() {
         scrollEnabled={false}
         ref={logsRef}
         data={logs}
-        renderItem={({ item }) => <Text style={{ color: 'white' }}>{item.title}</Text>}
+        renderItem={({ item, index }) => (
+          <Text style={{ color: 'white', marginBottom: index === logs.length - 1 ? 8 : 0 }}>{item.title}</Text>
+        )}
         style={{
           backgroundColor: '#555',
           marginBottom: 16,
           borderRadius: 8,
           paddingHorizontal: 8,
-          paddingTop: 8
+          paddingTop: 8,
+          marginBottom: 8
         }}
         ListFooterComponent={<View style={{ paddingBottom: 8 }} />}
       />
@@ -317,7 +327,8 @@ const styles = StyleSheet.create({
   },
   connectButtonContainer: {
     justifyContent: 'center',
-    alignItems: 'center'
+    alignItems: 'center',
+    marginTop: 8
   },
   statusText: {
     marginBottom: 16,
