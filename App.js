@@ -76,7 +76,7 @@ export default function App() {
       let serverPort = null
       let announced = false
       const serverIP = config.serverIP
-      let lastReceivedPacket = Date.now()
+      let lastReceivedPacket = null
       let shouldClose = false
 
       // get public ip
@@ -158,20 +158,14 @@ export default function App() {
           announcementPacket[1] = 0
           announcementPacket[2] = portBytes[0]
           announcementPacket[3] = portBytes[1]
-          connectionToServer.send(
-            announcementPacket,
-            undefined,
-            undefined,
-            remoteInfo.port,
-            remoteInfo.address,
-            err => {
-              if (err) log('error sending announcement packet: ' + err.message)
-              else {
-                log('sent announcement packet to server')
-                setStatus('connected')
-              }
+          connectionToServer.send(announcementPacket, undefined, undefined, serverPort, serverIP, err => {
+            if (err) log('error sending announcement packet: ' + err.message)
+            else {
+              log('sent announcement packet to server')
+              setStatus('connected')
+              announced = true
             }
-          )
+          })
           userIP = remoteInfo.address
           userPort = remoteInfo.port
         }
@@ -181,7 +175,7 @@ export default function App() {
       })
 
       while (!shouldClose) {
-        if (Date.now() - lastReceivedPacket > 15000) {
+        if (lastReceivedPacket !== null && Date.now() - lastReceivedPacket > 15000) {
           shouldClose = true
           setStatus('disconnected')
           showToast('Sneaky Tunnel Disconnected')
