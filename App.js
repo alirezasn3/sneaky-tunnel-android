@@ -263,7 +263,7 @@ export default function App() {
         style={{
           ...styles.statusText,
           letterSpacing: 2,
-          color: status === 'connected' ? 'green' : 'disconnected' ? 'red' : 'orange'
+          color: status === 'connected' ? 'green' : status === 'disconnected' ? 'red' : 'orange'
         }}
       >
         {status.toUpperCase()}
