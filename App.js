@@ -149,7 +149,7 @@ export default function App() {
       }
 
       // listen for packets from service
-      connectionToService.bind(Number(servicePort))
+      connectionToService.bind(Number(config.servicePort))
       const port = Number(serverPort) // to avoid reading config
       const ip = config.serverIP // to avoid reading config
       connectionToService.on('message', (data, remoteInfo) => {
