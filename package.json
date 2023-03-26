@@ -22,7 +22,8 @@
     "react-native-udp": "^4.1.7"
   },
   "devDependencies": {
-    "@babel/core": "^7.20.0"
+    "@babel/core": "^7.20.0",
+    "babel-plugin-transform-remove-console": "^6.9.4"
   },
   "private": true
 }
