@@ -1,10 +1,10 @@
 import { StatusBar } from 'expo-status-bar'
-import { ActivityIndicator, Button, FlatList, StyleSheet, Text, TextInput, View, ToastAndroid } from 'react-native'
+import { Button, StyleSheet, Text, TextInput, View, ToastAndroid, Alert } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import * as Battery from 'expo-battery'
 import BackgroundService from 'react-native-background-actions'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import dgram from 'react-native-udp'
 
 function sleep(time) {
@@ -34,212 +34,243 @@ function showToast(message) {
 }
 
 export default function App() {
-  const [status, setStatus] = useState('disconnected')
-  const [logs, setLogs] = useState([])
+  const [status, setStatus] = useState('Disconnected')
+  const [statusMessage, setStatusMessage] = useState('')
   const [config, setConfig] = useState({
     serverIP: '',
     negotiator: '',
     servicePort: ''
   })
-  const logsRef = useRef()
 
   useEffect(() => {
-    ;(async () => {
-      const enabled = await Battery.isBatteryOptimizationEnabledAsync()
-      if (enabled) log('Please disable battery optimization')
-      else log('Battery optimization disabled')
-      await loadConfig()
-    })()
+    initApp()
   }, [])
 
-  async function loadConfig() {
+  async function initApp() {
     try {
+      // get battery optimization status
+      const enabled = await Battery.isBatteryOptimizationEnabledAsync()
+      if (enabled) {
+        // alert user to disable battery optimizaion
+        Alert.alert(
+          'Battery Optimization Warning',
+          'Please disable battery optimizations or allow background activity.',
+          [{ text: 'OK' }]
+        )
+      } else setStatusMessage('Battery optimization disabled')
+
+      // load config from local storage
       const res = await AsyncStorage.getItem('@sneakytunnelstoragekey')
       if (res !== null) {
         const data = JSON.parse(res)
         setConfig(oldConfig => ({ ...oldConfig, ...data }))
       }
-      log('Config loaded')
-    } catch (e) {
-      log(e.message)
+      setStatusMessage('Config loaded')
+    } catch (error) {
+      setStatusMessage(error.message)
+      console.log(error)
     }
   }
 
   async function startTunnel() {
     try {
-      // declare global vars
+      // declare vars
       const connectionToService = dgram.createSocket({ type: 'udp4' })
       const connectionToServer = dgram.createSocket({ type: 'udp4' })
       let userIP = null
       let userPort = null
       let clientPort = null
       let serverPort = null
-      let announced = false
       const serverIP = config.serverIP
       let lastReceivedPacket = null
-      let shouldClose = false
 
       // get public ip
+      setStatus('Finding Public IP')
       const publicIP = await (await fetch('https://api.ipify.org')).text()
-      log(publicIP)
+      setStatusMessage(`Public IP: ${publicIP}`)
 
       // test negotiator
+      setStatus('Testing Negotiator')
       let res = await fetch(config.negotiator, { method: 'HEAD' })
       if (res.status === 200) {
-        log('negotiator ok')
+        setStatusMessage('Negotiator ok')
       } else {
-        log('negotiator not ok')
+        setStatusMessage('Negotiator not ok')
         return
       }
 
       // open port and negotiate
+      setStatus('Opening New Port')
       connectionToServer.bind(randomPort())
       connectionToServer.once('listening', () => {
         clientPort = connectionToServer.address().port
-        log('client port selected: ' + clientPort)
+        setStatusMessage(`Opened port ${clientPort}`)
       })
       while (clientPort === null) {
         await sleep(50)
       }
+      setStatus("Getting Server's Port")
       res = await fetch(`${config.negotiator}/${serverIP}/${publicIP}:${clientPort}`)
       if (res.status === 200) {
         serverPort = await res.text()
         serverPort = Number(serverPort)
-        log('negotiated server port: ' + serverPort)
+        setStatusMessage(`Negotiated port ${serverPort}`)
       } else {
-        log('could not negotatie server port')
+        setStatusMessage("Could not get server's port")
         return
       }
 
       // send dummy packet
-      const dummyPacket = new Uint8Array(2)
-      dummyPacket[0] = 1
-      dummyPacket[1] = 0
-      connectionToServer.send(dummyPacket, undefined, undefined, Number(serverPort), serverIP, err => {
-        if (err) log('error sending dummy packet: ' + err.message)
-        else log('sent dummy packet to server')
+      setStatus('Sending Dummy Packet')
+      connectionToServer.send([1, 0], undefined, undefined, serverPort, serverIP, err => {
+        if (err) {
+          setStatusMessage('Failed to sending dummy packet: ' + err.message)
+          BackgroundService.stop()
+        } else setStatusMessage('Sent dummy packet to server')
       })
 
       // listen for packets from server
       connectionToServer.on('message', (data, remoteInfo) => {
-        if (remoteInfo.address !== serverIP) return
+        // if (remoteInfo.address !== serverIP) return
+
+        // set last received packet timestamp
+        lastReceivedPacket = Date.now()
+
+        // check for flags
         if (data[0] > 0) {
-          if (data[0] === 1) {
-            log('received dummy packet from server')
-            setStatus('connected')
-          } else if (data[0] === 2) {
-            lastReceivedPacket = Date.now()
+          if (data[0] == 1) {
+            setStatusMessage('Received dummy packet from server')
+            setStatus('Connected')
+          } else if (data[0] == 2) {
             connectionToServer.send([5, 0], undefined, undefined, serverPort, serverIP, err => {
-              if (err) log('failed to send keep-alive response to server')
+              if (err) setStatusMessage('Failed to send keep-alive response to server')
             })
           }
           return
         }
-        connectionToService.send(data.slice(2), undefined, undefined, userPort, userIP, err => {
-          if (err) log('error sending data packet to service' + err.message)
+
+        // forward packet to service
+        connectionToService.send(data, 2, remoteInfo.size, userPort, userIP, err => {
+          if (err) setStatusMessage('Error sending data packet to service' + err.message)
         })
       })
 
-      // ask for dummy packet
+      // wait for 3 seconds and ask for dummy packet from server
+      setStatus('Requesting Dummy Packet')
       await sleep(3000)
       res = await fetch(`${config.negotiator}/${serverIP}/${publicIP}:${clientPort}`, { method: 'POST' })
       if (res.status !== 200) {
-        log('Failed to ask for dummy packet with status: ' + res.status)
+        setStatusMessage('Failed to ask for dummy packet with status: ' + res.status)
         return
       }
 
-      // listen for packets from service
+      // bind service connection
       connectionToService.bind(Number(config.servicePort))
-      connectionToService.on('message', (data, remoteInfo) => {
-        if (!announced) {
-          const portBytes = stringToUint8Array(config.servicePort)
-          const announcementPacket = new Uint8Array(4)
-          announcementPacket[0] = 4
-          announcementPacket[1] = 0
-          announcementPacket[2] = portBytes[0]
-          announcementPacket[3] = portBytes[1]
-          connectionToServer.send(announcementPacket, undefined, undefined, serverPort, serverIP, err => {
-            if (err) log('error sending announcement packet: ' + err.message)
-            else {
-              log('sent announcement packet to server')
-              setStatus('connected')
-              announced = true
+
+      // set up on time listener to receive first packet from service
+      connectionToService.once('message', (data, remoteInfo) => {
+        // send announcement packet to server
+        connectionToServer.send(
+          [4, 0, ...stringToUint8Array(config.servicePort)],
+          undefined,
+          undefined,
+          serverPort,
+          serverIP,
+          err => {
+            if (err) {
+              setStatusMessage('Error sending announcement packet: ' + err.message)
+              BackgroundService.stop()
+            } else {
+              setStatusMessage('Sent announcement packet to server')
+              setStatus('Connected')
             }
-          })
-          userIP = remoteInfo.address
-          userPort = remoteInfo.port
-        }
+          }
+        )
+        // store user's ip and port
+        userIP = remoteInfo.address
+        userPort = remoteInfo.port
+
+        // forward first packet to server
         connectionToServer.send([0, 0, ...data], undefined, undefined, serverPort, serverIP, err => {
-          if (err) log('error sending data packet to server' + err.message)
+          if (err) {
+            setStatusMessage('Error sending first data packet to server' + err.message)
+            BackgroundService.stop()
+          }
         })
+
+        // listen for the rest of the packets from service and forward them to server
+        connectionToService.on('message', data =>
+          connectionToServer.send([0, 0, ...data], undefined, undefined, serverPort, serverIP)
+        )
       })
 
-      while (!shouldClose) {
+      // listen for errors
+      connectionToServer.on('error', err => {
+        setStatus('Discconected')
+        setStatusMessage(err.message)
+        BackgroundService.stop()
+      })
+
+      // check to see if still connected to server every 15 seconds
+      while (true) {
         if (lastReceivedPacket !== null && Date.now() - lastReceivedPacket > 15000) {
-          shouldClose = true
-          setStatus('disconnected')
+          setStatus('Disconnected')
           showToast('Sneaky Tunnel Disconnected')
-          log('did not receive keep-alive packet in time')
+          setStatusMessage('Did not receive keep-alive packet in time')
+          BackgroundService.stop()
         }
         await sleep(15000)
       }
     } catch (error) {
-      log(error.message)
+      setStatusMessage(error.message)
     } finally {
-      setStatus('disconnected')
+      setStatus('Disconnected')
       showToast('Sneaky Tunnel Disconnected')
-      log('service exited')
     }
   }
 
   async function connectButtonHandler() {
     try {
-      if (status === 'connected') {
+      if (status == 'Connected') {
         await BackgroundService.stop()
-        log('disconnected')
-        setStatus('disconnected')
+        setStatus('Disconnected')
       } else {
-        setStatus('connecting')
+        setStatus('Connecting')
+
+        // save config to local storage
         await AsyncStorage.setItem('@sneakytunnelstoragekey', JSON.stringify(config))
-        log('Saved config')
+        setStatusMessage('Saved config')
+
+        // start tunnel as a background service
         await BackgroundService.start(startTunnel, {
           taskName: 'Sneaky Tunnel',
           taskTitle: 'Sneaky Tunnel',
           taskDesc: 'Sneaky Tunnel Service Started',
-          taskIcon: {
-            name: 'ic_launcher',
-            type: 'mipmap'
-          },
+          taskIcon: { name: 'ic_launcher', type: 'mipmap' },
           color: '#ff00ff',
-          linkingURI: 'yourSchemeHere://chat/jane',
-          parameters: {}
+          linkingURI: 'yourSchemeHere://chat/jane'
         })
       }
     } catch (error) {
+      setStatusMessage(error.message)
       console.log(error)
     }
   }
 
-  async function log(message) {
-    setLogs(oldLogs => [
-      ...oldLogs,
-      {
-        title: `[${new Date().toLocaleTimeString('en-US', {
-          hour12: false,
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit'
-        })}] ${message}`
-      }
-    ])
-    setTimeout(() => logsRef.current?.scrollToEnd())
-  }
-
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView
+      style={{
+        flex: 1,
+        paddingVertical: 16,
+        paddingHorizontal: 8,
+        backgroundColor: '#222',
+        alignItems: 'center',
+        justifyContent: 'space-between'
+      }}
+    >
       <StatusBar style="light" />
-      <View style={styles.inputsContainer}>
-        <View style={styles.innerInputsContainer}>
+      <View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 }}>
           <TextInput
             style={{ ...styles.input, width: '60%' }}
             placeholder="Server IP"
@@ -260,74 +291,36 @@ export default function App() {
           onChangeText={t => setConfig(oldConfig => ({ ...oldConfig, negotiator: t }))}
         ></TextInput>
       </View>
-      <Text
-        style={{
-          ...styles.statusText,
-          letterSpacing: 2,
-          color: status === 'connected' ? 'green' : status === 'disconnected' ? 'red' : 'orange'
-        }}
-      >
-        {status.toUpperCase()}
-      </Text>
-      <FlatList
-        scrollEnabled={false}
-        ref={logsRef}
-        data={logs}
-        renderItem={({ item, index }) => (
-          <Text style={{ color: 'white', marginBottom: index === logs.length - 1 ? 8 : 0 }}>{item.title}</Text>
-        )}
-        style={{
-          backgroundColor: '#555',
-          marginBottom: 16,
-          borderRadius: 8,
-          paddingHorizontal: 8,
-          paddingTop: 8,
-          marginBottom: 8
-        }}
-        ListFooterComponent={<View style={{ paddingBottom: 8 }} />}
+      <View>
+        <Text
+          style={{
+            marginBottom: 16,
+            fontSize: 20,
+            textAlign: 'center',
+            fontWeight: 'bold',
+            letterSpacing: 2,
+            color: status === 'Connected' ? 'green' : status === 'Disconnected' ? 'red' : 'orange'
+          }}
+        >
+          {status}
+        </Text>
+        <Text style={{ color: '#aaa', fontSize: 12, fontWeight: 'bold' }}>{statusMessage}</Text>
+      </View>
+      <Button
+        disabled={status != 'Connected' && status != 'Disconnected'}
+        title={status === 'Connected' ? 'disconnect' : 'connect'}
+        onPress={connectButtonHandler}
       />
-      {status === 'connected' || status === 'disconnected' ? (
-        <View style={styles.connectButtonContainer}>
-          <Button title={status === 'connected' ? 'disconnect' : 'connect'} onPress={connectButtonHandler}></Button>
-        </View>
-      ) : (
-        <ActivityIndicator size={32}></ActivityIndicator>
-      )}
     </SafeAreaView>
   )
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingVertical: 16,
-    paddingHorizontal: 8,
-    backgroundColor: '#222'
-  },
-  inputsContainer: {
-    marginBottom: 16
-  },
-  innerInputsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 16
-  },
   input: {
     backgroundColor: '#555',
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 8,
     color: 'white'
-  },
-  connectButtonContainer: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 8
-  },
-  statusText: {
-    marginBottom: 16,
-    fontSize: 20,
-    textAlign: 'center',
-    fontWeight: 'bold'
   }
 })
