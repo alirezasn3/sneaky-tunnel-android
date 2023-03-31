@@ -84,11 +84,6 @@ export default function App() {
       const serverIP = config.serverIP
       let lastReceivedPacket = null
 
-      // get public ip
-      setStatus('Finding Public IP')
-      const publicIP = await (await fetch('https://api.ipify.org')).text()
-      setStatusMessage(`Public IP: ${publicIP}`)
-
       // test negotiator
       setStatus('Testing Negotiator')
       let res = await fetch(config.negotiator, { method: 'HEAD' })
@@ -110,7 +105,7 @@ export default function App() {
         await sleep(50)
       }
       setStatus("Getting Server's Port")
-      res = await fetch(`${config.negotiator}/${serverIP}/${publicIP}:${clientPort}`)
+      res = await fetch(`${config.negotiator}/${serverIP}/${clientPort}`)
       if (res.status === 200) {
         serverPort = await res.text()
         serverPort = Number(serverPort)
@@ -131,8 +126,6 @@ export default function App() {
 
       // listen for packets from server
       connectionToServer.on('message', (data, remoteInfo) => {
-        // if (remoteInfo.address !== serverIP) return
-
         // set last received packet timestamp
         lastReceivedPacket = Date.now()
 
@@ -155,10 +148,9 @@ export default function App() {
         })
       })
 
-      // wait for 3 seconds and ask for dummy packet from server
+      // ask for dummy packet from server
       setStatus('Requesting Dummy Packet')
-      await sleep(3000)
-      res = await fetch(`${config.negotiator}/${serverIP}/${publicIP}:${clientPort}`, { method: 'POST' })
+      res = await fetch(`${config.negotiator}/${serverIP}/${clientPort}`, { method: 'POST' })
       if (res.status !== 200) {
         setStatusMessage('Failed to ask for dummy packet with status: ' + res.status)
         return
@@ -217,7 +209,7 @@ export default function App() {
           setStatus('Disconnected')
           showToast('Sneaky Tunnel Disconnected')
           setStatusMessage('Did not receive keep-alive packet in time')
-          BackgroundService.stop()
+          await BackgroundService.stop()
         }
         await sleep(15000)
       }
@@ -226,6 +218,7 @@ export default function App() {
     } finally {
       setStatus('Disconnected')
       showToast('Sneaky Tunnel Disconnected')
+      if (BackgroundService.isRunning()) BackgroundService.stop()
     }
   }
 
@@ -276,12 +269,14 @@ export default function App() {
             placeholder="Server IP"
             value={config.serverIP}
             onChangeText={t => setConfig(oldConfig => ({ ...oldConfig, serverIP: t }))}
+            keyboardType="numeric"
           ></TextInput>
           <TextInput
             style={{ ...styles.input, width: '35%' }}
             placeholder="Service Port"
             value={config.servicePort}
             onChangeText={t => setConfig(oldConfig => ({ ...oldConfig, servicePort: t }))}
+            keyboardType="numeric"
           ></TextInput>
         </View>
         <TextInput
